@@ -1,0 +1,10 @@
+# runtime output
+*.log
+
+# local scratch / asset prep
+pixelate.ps1
+*.tmp
+
+# editor
+.vscode/
+.idea/
