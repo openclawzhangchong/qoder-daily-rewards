@@ -4,7 +4,13 @@
 > 纯 Windows UI 自动化 —— 不逆向接口、不改客户端、不碰登录态。
 
 <p align="center">
-  <img src="docs/img/step2-claim-button.png" alt="权益中心：每天领 100 Credits" width="440">
+  <img src="docs/img/step1-menu.png" alt="Qoder 左下角账号菜单里的「权益中心」入口" width="210">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/img/step2-claim-button.png" alt="权益中心：每天领 100 Credits，右侧「立即领取」" width="420">
+</p>
+
+<p align="center">
+  <sub>左：账号菜单里的「权益中心」入口（脚本自动点开）。右：弹窗中每天 100 Credits 那行的领取按钮 —— 就是脚本每天 10:01 要按的那一下。</sub>
 </p>
 
 <br>
