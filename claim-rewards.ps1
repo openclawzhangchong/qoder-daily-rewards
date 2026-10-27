@@ -3,7 +3,8 @@ param(
   [switch]$DryRun,
   [switch]$KeepA11y,
   [int]$BootTimeoutSec = 120,
-  [int]$Attempts = 3
+  [int]$Attempts = 3,
+  [int]$ClaimTimeoutSec = 75
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,16 +32,54 @@ function Wait-Node([string]$needle, [int]$sec, [switch]$Exact, [string]$type, [s
 }
 
 function Test-DialogOpen {
-  foreach ($m in $L.dialogMarkers) {
-    $visible = @($(Find-WebNode -needle $m) | Where-Object { -not $_.Offscreen })
-    if ($visible.Count -gt 0) { return $true }
-  }
-  return $false
+  $visible = @(Find-AnyWebNode -needles @($L.dialogMarkers)) | Where-Object { -not $_.Offscreen }
+  return $visible.Count -gt 0
 }
 
+# Claim labels drift between campaigns ("领取" today, "立即领取" before) and one is a
+# substring of the other, so candidates must be matched exactly rather than contained.
+function Wait-AnyNode([string[]]$needles, [string]$type, [int]$sec, [switch]$AnyState, [switch]$Contain) {
+  $deadline = (Get-Date).AddSeconds($sec)
+  while ($true) {
+    foreach ($h in @(Find-AnyWebNode -needles $needles)) {
+      if ($h.Offscreen) { continue }
+      if ($type -and $h.Type -ne $type) { continue }
+      if (-not $AnyState -and -not $h.Enabled) { continue }
+      if (-not $Contain -and ($needles -notcontains $h.Name)) { continue }
+      return $h
+    }
+    if ((Get-Date) -ge $deadline) { return $null }
+    Start-Sleep -Milliseconds 400
+  }
+}
+
+# Claimable and already-claimed are resolved in one pass on purpose: checking them in
+# sequence would make an already-claimed day wait out the whole claim timeout first.
+function Wait-ClaimState([int]$sec) {
+  $deadline = (Get-Date).AddSeconds($sec)
+  $all = @($L.claim) + @($L.claimed)
+  while ($true) {
+    $buttons = @(Find-AnyWebNode -needles $all) |
+      Where-Object { $_.Type -eq 'Button' -and -not $_.Offscreen }
+    $claimable = @($buttons | Where-Object { (@($L.claim) -contains $_.Name) -and $_.Enabled } | Select-Object -First 1)
+    if ($claimable.Count -gt 0) { return [pscustomobject]@{ Kind = 'claimable'; Node = $claimable[0] } }
+    $done = @($buttons | Where-Object { @($L.claimed) -contains $_.Name } | Select-Object -First 1)
+    if ($done.Count -gt 0) { return [pscustomobject]@{ Kind = 'claimed'; Node = $done[0] } }
+    if ((Get-Date) -ge $deadline) { return $null }
+    Start-Sleep -Milliseconds 400
+  }
+}
+
+# Esc alone leaves the campaign modal open, so fall back to the modal's own 关闭 button.
+# Caption buttons are filtered out upstream, so this can never close the app itself.
 function Close-Dialog {
   [void]([QoderUia.Key]::Tap(0x1B))
   Start-Sleep -Milliseconds 600
+  if (-not (Test-DialogOpen)) { return }
+  $x = @(Find-AnyWebNode -needles @($L.closeButton)) |
+    Where-Object { $_.Type -eq 'Button' -and $_.Name -eq $L.closeButton -and $_.Enabled -and -not $_.Offscreen } |
+    Select-Object -First 1
+  if ($x) { Log ("close dialog via " + (Invoke-Node $x)) }
 }
 
 function Ensure-QoderRunning {
@@ -73,7 +112,7 @@ function Ensure-A11y {
 
 function Open-RewardsDialog {
   if (Test-DialogOpen) { Log "rewards dialog already open"; return $true }
-  $menuItem = @(Find-WebNode -needle $L.rewardsCenter -Exact) |
+  $menuItem = @(Find-WebNode -needle $L.rewardsCenter) |
     Where-Object { $_.Type -eq 'MenuItem' -and $_.Enabled -and -not $_.Offscreen } |
     Select-Object -First 1
   if (-not $menuItem) {
@@ -82,7 +121,7 @@ function Open-RewardsDialog {
       Select-Object -First 1
     if (-not $menuBtn) { Log "menu trigger not found"; return $false }
     Log ("open user menu via " + (Invoke-Node $menuBtn))
-    $menuItem = Wait-Node -needle $L.rewardsCenter -sec 12 -Exact -type 'MenuItem'
+    $menuItem = Wait-Node -needle $L.rewardsCenter -sec 12 -type 'MenuItem'
     if (-not $menuItem) { Log "menu item not found"; return $false }
   }
   Log ("open rewards center via " + (Invoke-Node $menuItem))
@@ -100,28 +139,35 @@ try {
     Log "--- attempt $a/$Attempts ---"
     if (-not (Open-RewardsDialog)) { Close-Dialog; Start-Sleep -Seconds 2; continue }
 
-    $claim = Wait-Node -needle $L.claim -sec 20 -type 'Button'
-    if ($claim) {
-      if ($DryRun) {
-        $result = 'DRYRUN-CLAIMABLE'
-        Log "DRY RUN: would click '$($L.claim)' at $($claim.X),$($claim.Y)"
-      } else {
-        Log ("click claim via " + (Invoke-Node $claim))
-        $ok = Wait-Node -needle $L.claimed -sec 20 -type 'Button' -AnyState
-        $result = if ($ok) { 'CLAIMED' } else { 'CLICKED-UNVERIFIED' }
-      }
-      break
+    # The dialog body is a server-rendered nested document ("Qoder Campaign"); rows paint
+    # first and the action buttons arrive seconds later, so wait for the header before racing.
+    $ready = Wait-AnyNode -needles @($L.dialogMarkers) -sec 45 -Contain
+    if (-not $ready) { Log "campaign document never rendered"; Close-Dialog; Start-Sleep -Seconds 2; continue }
+
+    $state = Wait-ClaimState -sec $ClaimTimeoutSec
+    if (-not $state) {
+      Log "dialog showed no claim or claimed button; resetting"
+      Close-Dialog
+      Start-Sleep -Seconds 2
+      continue
     }
 
-    if (Wait-Node -needle $L.claimed -sec 6 -type 'Button' -AnyState) {
+    if ($state.Kind -eq 'claimed') {
       $result = 'ALREADY-CLAIMED'
       Log "today already claimed"
       break
     }
 
-    Log "dialog showed neither '$($L.claim)' nor '$($L.claimed)'; resetting"
-    Close-Dialog
-    Start-Sleep -Seconds 2
+    $claim = $state.Node
+    if ($DryRun) {
+      $result = 'DRYRUN-CLAIMABLE'
+      Log "DRY RUN: would click '$($claim.Name)' at $($claim.X),$($claim.Y)"
+    } else {
+      Log ("click claim '$($claim.Name)' via " + (Invoke-Node $claim))
+      $ok = Wait-AnyNode -needles @($L.claimed) -type 'Button' -sec 20 -AnyState
+      $result = if ($ok) { 'CLAIMED' } else { 'CLICKED-UNVERIFIED' }
+    }
+    break
   }
 
   Close-Dialog

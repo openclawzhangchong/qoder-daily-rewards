@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$At = '10:01',
+  [string]$At = '11:01',
   [int]$TickSeconds = 30
 )
 

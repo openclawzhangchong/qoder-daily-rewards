@@ -213,3 +213,33 @@ function Find-WebNode {
   }
   return $res
 }
+
+# Candidate labels change between campaigns, but a full tree walk costs seconds, so poll
+# once per tick for the whole group and let callers filter exact/contained on .Name.
+function Find-AnyWebNode {
+  param([string[]]$needles, [int]$maxDepth = 60)
+  $keys = @($needles | Where-Object { $_ -ne '' })
+  $found = New-Object System.Collections.ArrayList
+  if ($keys.Count -eq 0) { return $found }
+  foreach ($w in @(Get-QoderWindows)) {
+    $stack = New-Object System.Collections.Stack
+    $stack.Push(@{ el = $w; d = 0 })
+    while ($stack.Count -gt 0) {
+      $item = $stack.Pop()
+      $el = $item.el; $d = $item.d
+      $nm = ''; $cls = ''
+      try { $nm = $el.Current.Name } catch { }
+      try { $cls = $el.Current.ClassName } catch { }
+      if ($nm -ne '' -and $cls -ne 'WinCaptionButton') {
+        foreach ($k in $keys) {
+          if ($nm.Contains($k)) { [void]$found.Add((Get-NodeInfo $el)); break }
+        }
+      }
+      if ($d -ge $maxDepth) { continue }
+      try {
+        foreach ($c in $el.FindAll($TS::Children, $COND_TRUE)) { $stack.Push(@{ el = $c; d = $d + 1 }) }
+      } catch { }
+    }
+  }
+  return $found
+}

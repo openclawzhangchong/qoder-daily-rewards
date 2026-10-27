@@ -1,6 +1,6 @@
 # Qoder 每日权益自动领取
 
-> 每天 10:01 自动打开 Qoder Desktop 的「权益中心」，点掉那个「立即领取」，把 100 Credits 收下。
+> 每天 11:01 自动打开 Qoder Desktop 的「权益中心」，点掉那个「领取」，把 100 Credits 收下。
 > 纯 Windows UI 自动化 —— 不逆向接口、不改客户端、不碰登录态。
 
 <p align="center">
@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <sub>左：账号菜单里的「权益中心」入口（脚本自动点开）。右：弹窗中每天 100 Credits 那行的领取按钮 —— 就是脚本每天 10:01 要按的那一下。</sub>
+  <sub>左：账号菜单里的「权益中心」入口（脚本自动点开）。右：弹窗中每天 100 Credits 那行的领取按钮 —— 就是脚本每天 11:01 要按的那一下。</sub>
 </p>
 
 <br>
@@ -42,11 +42,13 @@
 
 ## 为什么要做这个
 
-Qoder Desktop 每天 10:00（UTC+8）刷新一次可领取的活动权益，点一下就是 100 Credits，领取后 30 天有效。
+Qoder Desktop 每天刷新一次可领取的活动权益，点一下就是 100 Credits，领取后 30 天有效。
+
+刷新时间**不是固定的**：一开始是 10:00（UTC+8），后来实际变成 11:00 才发出来。所以脚本默认 11:01，比刷新晚一分钟。这段时间如果又变了，改 `-At` 就行（见[配置](#配置)）。
 
 问题是它不会自己点。忘了领就是忘了领。
 
-所以写了这个脚本：**把「点开账号菜单 → 点权益中心 → 点立即领取 → 关掉弹窗」这一串人工动作交给系统在每个早上自动做一遍。**
+所以写了这个脚本：**把「点开账号菜单 → 点权益中心 → 点领取 → 关掉弹窗」这一串人工动作交给系统在每个早上自动做一遍。**
 
 ## 它是怎么工作的
 
@@ -74,21 +76,49 @@ SystemParametersInfo(SPI_SETSCREENREADER /* 0x0047 */, 0, [ref]$true, SPIF_UPDAT
 大约 3～4 秒后，完整的网页控件树就出来了，而且带着可读的无障碍名称：
 
 ```
-Button | 打开用户菜单
-MenuItem | 权益中心
-Button | 立即领取        ← 领过之后变成 Button | 已领取 (IsEnabled = False)
-Group  | 可领取奖励
+Button   | 打开用户菜单
+MenuItem | 权益中心，有权益待领取     ← 有待领取时会带上数量后缀，所以要按前缀匹配
+Button   | 领取                        ← 改版前叫「立即领取」
+Button   | 已领取  (IsEnabled = False) ← 领过之后
+Group    | 可领取奖励
 ```
 
 拿到这些名字，剩下的就是标准的 UIA 操作：`ExpandCollapsePattern` 展开菜单，`InvokePattern` 点菜单项和按钮。
 
 **因为走的是 Pattern 而不是坐标点击，所以脚本不需要移动你的鼠标、也不需要窗口在前台。**
 
+### 两个容易踩的坑
+
+**1. 「领取」是「已领取」的子串。**
+
+活动改版后按钮从「立即领取」变成了「领取」。如果按"包含"去匹配，一个已经领过的按钮（`已领取`）会被当成可领取的目标，然后你会对着一个 disabled 的按钮 Invoke，日志报 `CLICKED-UNVERIFIED`。
+
+所以候选标签是**数组**、并且按**全等**匹配：
+
+```json
+"claim":   ["领取", "立即领取", "去领取"],
+"claimed": ["已领取", "已抢光"]
+```
+
+**2. 活动内容是嵌套的远端页面，渲染比弹窗慢得多。**
+
+权益弹窗本身立刻出来，但里面那个 `Document | Qoder Campaign` 是服务端渲染的：行先出现，**按钮要再等十几二十秒**。脚本早期的做法是"20 秒找不到就 Esc 重来"，结果每次都从头重新加载，永远等不到。
+
+现在分两步：先用 `dialogMarkers`（弹窗标题）等它渲染就绪（45 秒上限），再等按钮（`-ClaimTimeoutSec`，默认 75 秒）。
+
+```
+Document | Qoder Campaign     ← 嵌套文档，按钮在里面
+  Group  | 可领取奖励
+  Button | 领取
+```
+
+另外，一次 UIA 全树遍历要秒级，所以整组候选标签是**一次遍历**里全部比对完的，不是每个标签各遍历一遍。
+
 ### 完整流程
 
 ```mermaid
 flowchart TD
-    A[watcher 每 30 秒检查一次时间] -->|到 10:01| B[claim-rewards.ps1]
+    A[计划任务 每天 11:01] --> B[claim-rewards.ps1]
     B --> C{Qoder 在运行?}
     C -->|否| D[启动 Qoder 并等窗口出现]
     C -->|是| E
@@ -98,17 +128,17 @@ flowchart TD
     F --> G{权益弹窗已经开着?}
     G -->|是| I
     G -->|否| H[点 打开用户菜单 → 点 权益中心]
-    H --> I{找到可点击的 立即领取?}
-    I -->|是| J[点击 → 等待变成 已领取 → 记 CLAIMED]
-    I -->|否，只有 disabled 的 已领取| K[记 ALREADY-CLAIMED]
-    I -->|两者都没有| L[按 Esc 复位后重试，最多 3 次]
-    J --> M[按 Esc 关闭弹窗]
+    H --> I{等到 可领取/已领取 按钮?}
+    I -->|可领取| J[点击 → 等待翻成 已领取 → 记 CLAIMED]
+    I -->|只有 已领取| K[记 ALREADY-CLAIMED]
+    I -->|都没等到| L[关弹窗后重试，最多 3 次]
+    J --> M[关弹窗: Esc, 不行再点弹窗自己的关闭]
     K --> M
 ```
 
 ### 为什么不去调 HTTP 接口
 
-一开始确实翻了客户端的 `app.asar`。能搜到 `rewardsCenter: "权益中心"` 这类文案，但「立即领取」的按钮文字和请求路径**不在本地包里** —— 权益弹窗的内容是远端下发的，接口形态属于未公开实现。
+一开始确实翻了客户端的 `app.asar`。能搜到 `rewardsCenter: "权益中心"` 这类文案，但领取按钮的文字和请求路径**不在本地包里** —— 权益弹窗的内容是远端下发的，接口形态属于未公开实现。
 
 逆向前端包去拼私有接口，一旦服务端调整就直接失效，而且这类做法通常踩服务条款。**用 UI 自动化模拟自己的点击，行为特征和你手动领是一模一样的**，反而更稳、更干净。
 
@@ -120,7 +150,8 @@ flowchart TD
 | PowerShell | 系统自带的 Windows PowerShell 5.1 即可，无需 PowerShell 7 |
 | Qoder | 已安装并已登录 |
 | 第三方依赖 | 无 |
-| 管理员权限 | **不需要**（调度走 `HKCU\...\Run`，见下文） |
+| 管理员权限 | **注册时**需要一次提权（见下方说明）；注册完成后日常运行不需要 |
+| 登录状态 | 到点时必须是**已登录的交互式会话**（UIA 只能操作有桌面的窗口） |
 
 ## 快速开始
 
@@ -132,32 +163,48 @@ cd qoder-daily-rewards
 # 2. 先空跑一次，确认能找到按钮（不会真的点）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\claim-rewards.ps1 -DryRun
 
-# 3. 注册开机自启 + 立刻启动常驻调度
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install-autostart.ps1 -StartNow
+# 3. 注册计划任务：每天 11:01，立即跑一次验证
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-task.ps1 -At 11:01 -RunNow
 ```
 
-装完之后，每天早上 10:01 它自己就跑了。日志在同目录 `claim.log` / `watch.log`。
+装完之后，每天早上 11:01 它自己就跑一次。日志在同目录 `claim.log`。
+
+> `setup-task.ps1` 会自己提权（`Start-Process -Verb RunAs`），提权后的子进程负责 `Register-ScheduledTask`，结果通过临时文件回传 —— 因为提权子进程的 stdout 是拿不回来的，只能落盘。
 
 <details>
-<summary>为什么不用 Windows 计划任务？</summary>
+<summary>为什么要提权？受限令牌下 Register-ScheduledTask 会被拒</summary>
 
-本来首选 `Register-ScheduledTask`（支持从睡眠唤醒、错过自动补跑）。但**普通用户令牌下创建计划任务会被拒**：
+直接在当前 shell 里注册计划任务会失败：
 
 ```
 Register-ScheduledTask : 拒绝访问。  HRESULT 0x80070005
 schtasks /Create       →  拒绝访问
 ```
 
-即使账户名叫 `Administrator`，只要不是提权令牌（`IsInRole(Administrator) = False`）就建不了。
+即使账户名就叫 `Administrator`。原因不是"权限不够"，而是这个 shell 跑在 **UAC 受限令牌**（UAC-filtered token）里：账户是管理员，但进程拿到的令牌 `IsInRole(Administrator) = False`。
 
-所以这里改用 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 注册一个常驻 watcher —— **HKCU 用户可写，不需要提权**。代价是机器整个处于关机状态时不会执行；但从睡眠恢复后，watcher 发现当天目标时间已过会**立刻补跑一次**。
-
-如果你确实想走计划任务（比如需要唤醒睡眠中的机器），提权后执行：
+解决办法是让子进程以完整管理员令牌跑：
 
 ```powershell
-schtasks /Create /TN "QoderDailyRewardsClaim" /SC DAILY /ST 10:01 `
-  /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\path\to\claim-rewards.ps1\""
+Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList '-File','register.ps1'
 ```
+
+**是否弹 UAC 取决于系统设置。** `ConsentPromptBehaviorAdmin=0`（滑块拉到"从不通知"）时是静默提升；默认设置会弹窗，那时需要你手动点是。本项目的 `setup-task.ps1` 两种情况都能用 —— 有弹窗就点一下。
+
+</details>
+
+<details>
+<summary>备选：不想提权的话，用 HKCU 常驻 watcher</summary>
+
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 是用户可写的，不需要提权：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-autostart.ps1 -At 11:01 -StartNow
+```
+
+它启动一个常驻进程 `claim-watch.ps1`，每 30 秒比一次时间，到点拉起一次领取，并带命名互斥锁防多开。代价是必须**登录后**才启动、且机器整晚关机就错过；从睡眠恢复后如果当天目标时间已过，它会立刻补跑一次。
+
+两种方式**只开一个**。同时开会在一分钟内点两次弹窗、互相打架。
 
 </details>
 
@@ -165,11 +212,12 @@ schtasks /Create /TN "QoderDailyRewardsClaim" /SC DAILY /ST 10:01 `
 
 | 文件 | 作用 |
 |---|---|
-| `claim-rewards.ps1` | 单次领取逻辑。幂等，失败重试 3 次，结束按 Esc 复位弹窗 |
-| `claim-watch.ps1` | 常驻调度。每 30 秒比对一次时间，到点拉起一次领取；带互斥锁防多开 |
+| `claim-rewards.ps1` | 单次领取逻辑。幂等，失败重试 3 次，结束关弹窗 |
+| `setup-task.ps1` | **主推**：提权注册 Windows 计划任务（`-At` 改时间、`-RunNow` 立刻跑、`-Remove` 卸载） |
 | `uia-lib.ps1` | UIA 封装：找窗口、按名称搜节点、`Invoke`/`Toggle`/`Expand` 点击、无障碍开关、Esc |
 | `labels.json` | 界面上的中文文案。**界面改版只改这个文件，不用动脚本** |
-| `install-autostart.ps1` | 写 `HKCU\...\Run` 自启项，可选立即拉起 watcher |
+| `claim-watch.ps1` | 备选的常驻调度：每 30 秒比一次时间，到点拉起一次领取；带互斥锁防多开 |
+| `install-autostart.ps1` | 备选：写 `HKCU\...\Run` 自启项，可选立即拉起 watcher |
 | `uninstall-autostart.ps1` | 删自启项并停掉 watcher 进程 |
 | `docs/img/` | 本文档用的截图（账号名已打码） |
 
@@ -178,11 +226,24 @@ schtasks /Create /TN "QoderDailyRewardsClaim" /SC DAILY /ST 10:01 `
 ### 改触发时间
 
 ```powershell
-# watcher 启动时传 -At（24 小时制）
-powershell -File .\claim-watch.ps1 -At "10:30"
+# 重新注册计划任务（会覆盖同名任务），-At 是 24 小时制
+powershell -File .\setup-task.ps1 -At 11:01 -RunNow
+
+# 备选 watcher 路线
+powershell -File .\claim-watch.ps1 -At "11:01"
 ```
 
-权益是 10:00 刷新，留 1 分钟余量比较稳。
+权益刷新时间变过（10:00 → 11:00），留 1 分钟余量比较稳。
+
+### 等按钮的耐心值
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `-ClaimTimeoutSec` | 75 | 等「领取」按钮出现多久（活动 iframe 冷启动要十几二十秒） |
+| `-Attempts` | 3 | 整个流程最多重试几次 |
+| `-BootTimeoutSec` | 120 | Qoder 没开着时，等它启动多久 |
+| `-KeepA11y` | 关 | 跑完不还原 `SPI_SETSCREENREADER` |
+| `-DryRun` | 关 | 只找按钮不点 |
 
 ### 界面文案变了怎么办
 
@@ -192,11 +253,14 @@ Qoder 更新后按钮文字可能变化。所有中文文案都集中在 `labels
 {
   "menuButton": "打开用户菜单",
   "rewardsCenter": "权益中心",
-  "claim": "立即领取",
-  "claimed": "已领取",
-  "dialogMarkers": ["可领取奖励", "专属活动权益"]
+  "claim": ["领取", "立即领取", "去领取"],
+  "claimed": ["已领取", "已抢光"],
+  "dialogMarkers": ["专属活动权益", "可领取奖励"],
+  "closeButton": "关闭"
 }
 ```
+
+`claim` / `claimed` / `dialogMarkers` 都是**数组**：命中任意一个就算。`claim` 按全等匹配（否则 `领取` 会命中 `已领取`），`dialogMarkers` 按包含匹配（标题可能带数量后缀）。`rewardsCenter` 同样按包含匹配，因为菜单项名字会变成 `权益中心，有权益待领取`。
 
 用 [dbg 手法](#找不到按钮) 打印当前 UIA 树里的真实名称，对上以后改这里即可。
 
@@ -212,14 +276,26 @@ powershell -File .\claim-rewards.ps1 -KeepA11y
 
 ## 日志与退出码
 
-`claim.log`（每次领取）与 `watch.log`（调度）都是追加写的 UTF-8：
+`claim.log` 是每次运行的记录（追加写 UTF-8）；走备选 watcher 路线时还会多一个 `watch.log` 记调度。
+
+真实的一次领取：
 
 ```
-2026-10-26 15:22:03  --- attempt 1/3 ---
-2026-10-26 15:22:03  open user menu via pattern:Expand
-2026-10-26 15:22:04  open rewards center via pattern:Invoke
-2026-10-26 15:22:25  today already claimed
-2026-10-26 15:22:25  === ALREADY-CLAIMED ===
+2026-10-27 11:25:20  --- attempt 1/3 ---
+2026-10-27 11:25:21  open user menu via pattern:Expand
+2026-10-27 11:25:22  open rewards center via pattern:Invoke
+2026-10-27 11:25:24  click claim '领取' via pattern:Invoke
+2026-10-27 11:25:26  === CLAIMED ===
+```
+
+已经领过的日子：
+
+```
+2026-10-27 11:35:01  --- attempt 1/3 ---
+2026-10-27 11:35:02  open user menu via pattern:Expand
+2026-10-27 11:35:02  open rewards center via pattern:Invoke
+2026-10-27 11:35:03  today already claimed
+2026-10-27 11:35:04  === ALREADY-CLAIMED ===
 ```
 
 | 结果 | 退出码 | 含义 |
@@ -239,21 +315,49 @@ powershell -NoProfile -File .\claim-rewards.ps1 -DryRun
 # 真跑
 powershell -NoProfile -File .\claim-rewards.ps1
 
-# 看 watcher 活着没
+# 看计划任务状态与上次结果
+powershell -NoProfile -Command "Get-ScheduledTaskInfo -TaskName QoderDailyRewardsClaim | Select-Object LastRunTime,LastTaskResult,NextRunTime"
+
+# 立刻触发一次（不用等到明天）
+powershell -NoProfile -Command "Start-ScheduledTask -TaskName QoderDailyRewardsClaim"
+
+# 备选路线：看 watcher 活着没
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter ""Name='powershell.exe'"" | Where-Object { $_.CommandLine -like '*claim-watch.ps1*' } | Select-Object ProcessId"
 ```
 
 ## 已知限制
 
-- **领取那一下的真实点击未在线上验证过。** 写这个脚本当天权益已经领过了，按钮是 disabled 的「已领取」，所以只验证到「导航正确 + 状态判定正确」。点击用的是和导航完全相同的 `InvokePattern` 路径，但第一次真跑建议瞄一眼日志是不是 `CLAIMED`。
-- **机器关机时不会执行。** watcher 是用户态进程，不会开机自启到登录之前。（睡眠恢复后会自动补跑。）
-- **需要一次交互式登录会话。** UIA 操作的是桌面窗口，锁屏一般仍可执行，但纯后台无人登录的会话不行。
-- **会短暂抢焦点。** 权益弹窗打开的约 20 秒里，屏幕上能看到那个窗口；脚本结束时按 Esc 关掉。如果你正好在全屏操作，会有视觉打扰。
+- **到点时必须是登录会话。** 计划任务用的是 `InteractiveToken`：UIA 操作的是桌面窗口，锁屏一般仍可执行，但"无人登录"的会话里没有桌面，点不到任何东西。
+- **机器关机时会错过。** 任务勾了 `StartWhenAvailable`，开机/恢复后会补跑一次当天错过的运行 —— 但如果一整天没开机，那天就没了。
+- **刷新时间官方会调。** 10:00 变过 11:00。如果连续几天都是 `FAILED`（按钮还没出现），把 `-At` 往后挪。
+- **会短暂抢焦点。** 权益弹窗打开后活动页要十几二十秒才渲染出按钮，这段时间屏幕上能看到那个窗口。脚本结束时按 Esc 关掉；Esc 无效时再点弹窗自己的「关闭」（窗口标题栏的同名按钮已被过滤，不会误关 Qoder）。
 - **只覆盖「每天领 100 Credits」这一项。** 弹窗里其他活动是「查看详情」，不在自动化范围内。
 - **依赖无障碍名称稳定。** Qoder 改版换文案就要更新 `labels.json`。
 - **`SPI_SETSCREENREADER` 是全局设置。** 开启期间，机器上其他 Chromium/Electron 应用也会构建无障碍树，可能带来轻微性能开销。脚本跑完会还原，但如果你在它运行时打开了别的浏览器，会受这个影响。
+- **脚本路径别乱挪。** 计划任务里写的是绝对路径，挪了目录要重新跑一次 `setup-task.ps1`。
 
 ## 故障排查
+
+### 计划任务跑了没 / 为什么没跑
+
+```powershell
+Get-ScheduledTask -TaskName QoderDailyRewardsClaim | Select-Object State
+Get-ScheduledTaskInfo -TaskName QoderDailyRewardsClaim
+```
+
+- `LastTaskResult = 0`：跑成功（不代表领到了，看 `claim.log` 的 `=== ... ===`）
+- `LastTaskResult = 1`：脚本报 `FAILED` / `CLICKED-UNVERIFIED`，看 `claim.log`
+- `LastTaskResult = 267011`（`0x41303`）：还没跑过
+- `LastTaskResult = 2147943726`（`0x800710E0`）：到点时用户没登录，被拒绝运行
+
+### 日志里是 `FAILED`，按钮没等到
+
+两种常见原因，先看 `claim.log` 里最后一句：
+
+| 最后一句 | 含义 | 处理 |
+|---|---|---|
+| `campaign document never rendered` | 活动 iframe 45 秒都没渲染出标题 | 多半是网络/服务端慢，过一会儿手动再跑一次 |
+| `dialog showed no claim or claimed button` | 弹窗出来了但没有可识别的按钮 | 多半是文案改了，对照 [找不到按钮](#找不到按钮) |
 
 ### 日志里出现 `renderer a11y still off`
 
@@ -283,23 +387,34 @@ Get-QoderWindows | ForEach-Object {
 
 ### 弹窗没关掉 / 误关了主窗口
 
-脚本用 Esc 关弹窗，**刻意没有用「关闭」按钮** —— 因为 Chromium 的窗口标题栏按钮无障碍名称也是 `关闭`（`ClassName = WinCaptionButton`），按名字点它会直接把 Qoder 关掉。`uia-lib.ps1` 里的 `Find-WebNode` 已经把这类原生按钮过滤掉了，自己改的时候注意别把这个过滤去掉。
+脚本先按 Esc，**Esc 关不掉时**才去点弹窗自己的「关闭」按钮（`labels.json` 里的 `closeButton`）。
 
-### 重复弹窗
+这里有个必须保留的过滤：Chromium **窗口标题栏**的关闭按钮，无障碍名称也是 `关闭`（`ClassName = WinCaptionButton`）。按名字随手点会把整个 Qoder 关掉。`uia-lib.ps1` 里的 `Find-WebNode` / `Find-AnyWebNode` 都跳过了 `WinCaptionButton`，自己改的时候别把这个过滤去掉。
 
-watcher 有命名互斥锁 `Local\QoderDailyRewardsClaimWatch`，第二个实例会直接退出。如果怀疑卡住：
+实测：早先只用 Esc 的版本跑完会把权益弹窗**留在屏幕上**（活动弹窗不响应 Esc），所以补了这层回退。
+
+### 重复运行 / 重复弹窗
+
+- 计划任务用 `MultipleInstances = IgnoreNew`：前一次没结束，这一次直接跳过。
+- 备选 watcher 有命名互斥锁 `Local\QoderDailyRewardsClaimWatch`，第二个实例会直接退出。
+- 计划任务和 watcher **不要同时装**，否则到点时两个进程会抢同一个弹窗。切换时先卸掉另一个：
 
 ```powershell
-powershell -File .\uninstall-autostart.ps1   # 停进程 + 删自启
+powershell -File .\setup-task.ps1 -Remove        # 卸计划任务
+powershell -File .\uninstall-autostart.ps1       # 停 watcher + 删自启
 ```
 
 ## 卸载
 
 ```powershell
+# 计划任务（会自动提权）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-task.ps1 -Remove
+
+# 备选 watcher 路线
 powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall-autostart.ps1
 ```
 
-删掉 `HKCU\...\Run\QoderDailyRewardsClaim` 自启项并停掉 watcher 进程。脚本目录本身可以直接删 —— 它不往系统里装任何东西（`SPI_SETSCREENREADER` 只在运行期间改、跑完还原）。
+计划任务会从任务计划程序里删掉；watcher 路线会删掉 `HKCU\...\Run\QoderDailyRewardsClaim` 并停掉进程。脚本目录本身可以直接删 —— 它不往系统里装任何东西（`SPI_SETSCREENREADER` 只在运行期间改、跑完还原）。
 
 ## 免责声明
 
@@ -318,23 +433,31 @@ MIT 授权，用坏了不负责。
 
 ## English
 
-A Windows desktop automation that claims the daily **100 Credits** reward inside **Qoder Desktop** every morning at 10:01.
+A Windows desktop automation that claims the daily **100 Credits** reward inside **Qoder Desktop** every morning at 11:01.
 
-Qoder's rewards center refreshes daily at 10:00 (UTC+8) and offers a claimable credit bundle. This script clicks it for you.
+Qoder's rewards center refreshes once a day and offers a claimable credit bundle. The refresh time is not fixed — it started at 10:00 (UTC+8) and later slipped to 11:00 — so the default trigger is 11:01 and `-At` changes it.
 
-**How it works.** Qoder Desktop is an Electron app. Its renderer content is invisible to Windows UI Automation by default — Chromium only builds the accessibility tree when it detects an assistive technology. The script flips the `SPI_SETSCREENREADER` system flag, waits a few seconds, and the full web control tree appears with readable accessible names (`打开用户菜单`, `权益中心`, `立即领取`). It then drives the UI through `ExpandCollapsePattern` and `InvokePattern`, which means **no cursor movement and no foreground window required**. Finally it presses Esc to dismiss the dialog and restores the system flag.
+**How it works.** Qoder Desktop is an Electron app. Its renderer content is invisible to Windows UI Automation by default — Chromium only builds the accessibility tree when it detects an assistive technology. The script flips the `SPI_SETSCREENREADER` system flag, waits a few seconds, and the full web control tree appears with readable accessible names (`打开用户菜单`, `权益中心`, `领取`). It then drives the UI through `ExpandCollapsePattern` and `InvokePattern`, which means **no cursor movement and no foreground window required**. Finally it dismisses the dialog and restores the system flag.
+
+Two details that are easy to get wrong. The claim label is a **substring of the claimed label** (`领取` inside `已领取`), so candidates are matched exactly rather than by containment. And the dialog body is a **server-rendered nested document** that paints its rows long before its buttons, so the script waits for the dialog header first and only then for the button (45 s + 75 s by default). Pressing Esc alone does not close that modal, so it falls back to the modal's own `关闭` button — window caption buttons share that accessible name and must stay filtered out.
 
 **Why not hit the API instead?** The claim button's label and request path are not present in the client's `app.asar` — the rewards dialog is server-rendered. Reverse-engineering an undocumented endpoint is brittle and a terms-of-service gray area. Simulating your own click is behaviorally identical to doing it by hand.
 
 **Idempotent.** If today's reward is already claimed the button is present but disabled, and the script logs `ALREADY-CLAIMED` and exits 0.
 
-**Scheduling.** Windows Task Scheduler requires elevation, which a UAC-filtered token does not have even when the account is literally named `Administrator` (`schtasks /Create` returns `Access is denied`, `0x80070005`). So the watcher registers itself under `HKCU\...\Run` instead — no admin needed — and loops on a 30-second tick. It cannot run while the machine is powered off, but it does catch up after wake-from-sleep.
+**Scheduling** uses Windows Task Scheduler (`setup-task.ps1`, daily 11:01, `StartWhenAvailable`, `MultipleInstances=IgnoreNew`). Registering a task needs a full admin token, and an ordinary shell is UAC-filtered even when the account is literally named `Administrator` (`Register-ScheduledTask` returns `Access is denied`, `0x80070005`). So `setup-task.ps1` re-launches itself with `Start-Process -Verb RunAs` and the elevated child does the registration. Whether that prompts depends on the machine's UAC setting; if a prompt appears, confirm it.
 
-**Requirements:** Windows 10/11, the built-in Windows PowerShell 5.1, Qoder installed and logged in. No third-party modules.
+The task runs with an **interactive token** on purpose: UI Automation needs a real desktop, so "run whether user is logged on or not" would find nothing to click. Consequence: it only fires while you are logged in, and a fully powered-off day is lost (a missed run is caught up on the next boot).
 
-**Caveat:** the actual claim click has not been verified against a live claimable button — the reward was already claimed on the day this was written, so only navigation and state detection were exercised end to end. Check `claim.log` after the first real run; you want to see `CLAIMED`.
+If you would rather not elevate at all, `install-autostart.ps1` registers a resident watcher under `HKCU\...\Run` instead — no admin needed, loops on a 30-second tick, catches up after wake-from-sleep. Install **one or the other**, never both.
 
-All UI strings live in `labels.json`, so a Qoder redesign needs an edit there rather than in the scripts. The `.ps1` sources are deliberately pure ASCII because Windows PowerShell 5.1 mis-decodes BOM-less UTF-8 script files.
+**Requirements:** Windows 10/11, the built-in Windows PowerShell 5.1, Qoder installed and logged in, and one-time elevation to register the scheduled task. No third-party modules.
+
+**Verified end to end** on 2026-10-27: `click claim '领取' via pattern:Invoke` followed by `=== CLAIMED ===`, exit code 0, and the reward row flipped to `已领取`. An already-claimed day logs `ALREADY-CLAIMED` and exits 0 in about two seconds.
+
+**Caveats.** It needs a logged-in interactive session at trigger time, a fully powered-off day is lost, and the refresh time itself is not contractual — if you start seeing `FAILED` several days running, move `-At` later. The script's path is baked into the scheduled task, so re-run `setup-task.ps1` after moving the folder.
+
+All UI strings live in `labels.json`, so a Qoder redesign needs an edit there rather than in the scripts. Claim and claimed labels are arrays matched by exact name (one is a substring of the other); dialog markers and the menu entry are matched by containment (their names pick up suffixes). The `.ps1` sources are deliberately pure ASCII because Windows PowerShell 5.1 mis-decodes BOM-less UTF-8 script files.
 
 ## License
 

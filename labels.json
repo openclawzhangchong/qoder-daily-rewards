@@ -1,7 +1,8 @@
 {
   "menuButton": "打开用户菜单",
   "rewardsCenter": "权益中心",
-  "claim": "立即领取",
-  "claimed": "已领取",
-  "dialogMarkers": ["可领取奖励", "专属活动权益"]
+  "claim": ["领取", "立即领取", "去领取"],
+  "claimed": ["已领取", "已抢光"],
+  "dialogMarkers": ["专属活动权益", "可领取奖励"],
+  "closeButton": "关闭"
 }
